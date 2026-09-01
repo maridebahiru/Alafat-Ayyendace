@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import { isSuperAdmin, logSuperAdminAudit } from './rbac';
 
 /**
  * Safely extract millisecond timestamp from Firestore Timestamp, Date, string, or number.
@@ -469,3 +470,324 @@ export const exportToCSV = ({ students, attendance, startDate, endDate, departme
   link.click();
   URL.revokeObjectURL(link.href);
 };
+
+/**
+ * Data Prep Function for Total Attended Summary & Detailed Logs Report (Super Admin).
+ */
+export const prepareTotalAttendedReportData = ({ students = [], attendance = [], startDate = '', endDate = '', department = 'All' }) => {
+  // 1. Filter students by department
+  let filteredStudents = [...students];
+  if (department && department !== 'All') {
+    filteredStudents = filteredStudents.filter(s => (s.department || 'General') === department);
+  }
+
+  // Sort students alphabetically by name using localeCompare with Ethiopic support
+  filteredStudents.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'am'));
+
+  // 2. Filter attendance records by date range
+  let filteredAttendance = [...attendance];
+  if (startDate) {
+    filteredAttendance = filteredAttendance.filter(a => {
+      const d = formatDateStr(a.date) || formatDateStr(a.scannedAt);
+      return d && d >= startDate;
+    });
+  }
+  if (endDate) {
+    filteredAttendance = filteredAttendance.filter(a => {
+      const d = formatDateStr(a.date) || formatDateStr(a.scannedAt);
+      return d && d <= endDate;
+    });
+  }
+
+  // Determine total unique event dates in period
+  const uniqueDatesInPeriod = new Set(
+    filteredAttendance
+      .map(a => formatDateStr(a.date) || formatDateStr(a.scannedAt))
+      .filter(Boolean)
+  );
+  const totalEventDays = uniqueDatesInPeriod.size || (startDate && endDate ? generateDateRange(startDate, endDate).length : 1);
+
+  // 3. Aggregate total attendance per student
+  const summaryRows = filteredStudents.map((s, idx) => {
+    const phone = s.phone || '';
+    const empId = s.employeeId || s.idNo || '';
+
+    // Match records for this student
+    const studentRecords = filteredAttendance.filter(a => 
+      (phone && a.phone === phone) || 
+      (empId && (a.employeeId === empId || a.idNo === empId))
+    );
+
+    // Get unique dates attended by student
+    const studentAttendedDates = new Set(
+      studentRecords
+        .map(a => formatDateStr(a.date) || formatDateStr(a.scannedAt))
+        .filter(Boolean)
+    );
+    const totalDaysAttended = studentAttendedDates.size;
+
+    // Attendance Rate %
+    const rateVal = totalEventDays > 0 ? Math.min(100, Math.round((totalDaysAttended / totalEventDays) * 100)) : 0;
+
+    // Sort timestamps to get first and latest scan
+    const timestamps = studentRecords
+      .map(a => getTimestampMs(a.scannedAt) || getTimestampMs(a.date))
+      .filter(Boolean)
+      .sort((a, b) => a - b);
+
+    const firstScanStr = timestamps.length > 0 
+      ? new Date(timestamps[0]).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' })
+      : 'N/A';
+    const latestScanStr = timestamps.length > 0
+      ? new Date(timestamps[timestamps.length - 1]).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' })
+      : 'N/A';
+
+    let status = 'No Attendance';
+    if (totalDaysAttended > 0) {
+      if (rateVal >= 80) status = 'Excellent (≥80%)';
+      else if (rateVal >= 50) status = 'Good (50-79%)';
+      else status = 'Low Attendance (<50%)';
+    }
+
+    return {
+      index: idx + 1,
+      name: s.name || 'N/A',
+      employeeId: empId || 'N/A',
+      phone: phone || 'N/A',
+      department: s.department || 'General',
+      position: s.position || 'N/A',
+      totalDaysAttended,
+      totalEventDays,
+      attendanceRate: `${rateVal}%`,
+      firstScan: firstScanStr,
+      latestScan: latestScanStr,
+      status
+    };
+  });
+
+  // 4. Construct Detailed Log Rows
+  const detailedLogs = filteredAttendance.map((a, idx) => {
+    const student = students.find(s => 
+      (a.phone && s.phone === a.phone) || 
+      (a.employeeId && (s.employeeId === a.employeeId || s.idNo === a.employeeId))
+    );
+    return {
+      index: idx + 1,
+      date: formatDateStr(a.date) || formatDateStr(a.scannedAt) || 'N/A',
+      time: formatTimeStr(a.scannedAt),
+      name: student?.name || a.studentName || 'N/A',
+      employeeId: a.employeeId || a.idNo || student?.employeeId || 'N/A',
+      phone: a.phone || student?.phone || 'N/A',
+      department: a.department || student?.department || 'General',
+      scannedBy: a.scannedBy || 'System',
+      location: typeof a.scannedLocation === 'string' ? a.scannedLocation : (a.scannedLocation?.city || 'N/A')
+    };
+  }).sort((a, b) => b.date.localeCompare(a.date));
+
+  const title = "Total Attended Summary & Attendance Log Report";
+  const startDesc = startDate || 'Beginning';
+  const endDesc = endDate || 'Latest';
+  const subtitle = `Date Range: ${startDesc} to ${endDesc} | Total Registered Students: ${filteredStudents.length} | Total Event Days: ${totalEventDays} | Department: ${department}`;
+
+  return { title, subtitle, summaryRows, detailedLogs, totalEventDays, totalScans: filteredAttendance.length };
+};
+
+/**
+ * Export Total Attended Report as formatted multi-sheet Excel (.xlsx) using ExcelJS.
+ * Strictly restricted to Super Admin only.
+ */
+export const exportTotalAttendedExcel = async ({ students, attendance, startDate, endDate, department }) => {
+  if (!isSuperAdmin()) {
+    alert("Access Denied: The Total Attended Report export is strictly restricted to Super Admin.");
+    return;
+  }
+
+  const reportData = prepareTotalAttendedReportData({ students, attendance, startDate, endDate, department });
+
+  if (reportData.summaryRows.length === 0) {
+    alert("No student records found matching the selected filters.");
+    return;
+  }
+
+  logSuperAdminAudit('export_total_attended_excel', {
+    startDate,
+    endDate,
+    department,
+    studentCount: reportData.summaryRows.length,
+    scanCount: reportData.totalScans
+  });
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'EJAT Attendance System - SuperAdmin';
+  workbook.created = new Date();
+  const fontFamily = 'Segoe UI';
+
+  // --- SHEET 1: Total Attended Summary ---
+  const summarySheet = workbook.addWorksheet('Total Attended Summary', {
+    views: [{ showGridLines: true }]
+  });
+
+  // Title Row (Row 1)
+  const titleRow = summarySheet.addRow([reportData.title]);
+  titleRow.height = 32;
+  summarySheet.mergeCells(1, 1, 1, 12);
+  const titleCell = titleRow.getCell(1);
+  titleCell.font = { name: fontFamily, size: 16, bold: true, color: { argb: 'FF65081B' } };
+  titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  // Subtitle Row (Row 2)
+  const subtitleRow = summarySheet.addRow([reportData.subtitle]);
+  subtitleRow.height = 22;
+  summarySheet.mergeCells(2, 1, 2, 12);
+  const subtitleCell = subtitleRow.getCell(1);
+  subtitleCell.font = { name: fontFamily, size: 10, italic: true, color: { argb: 'FF4B5563' } };
+  subtitleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  // Spacing Row (Row 3)
+  summarySheet.addRow([]);
+
+  // Headers (Row 4)
+  const summaryHeaders = [
+    "#", "Student Name", "Employee ID", "Phone", "Department", "Position",
+    "Total Attended (Days)", "Total Event Days", "Attendance Rate", "First Scan", "Latest Scan", "Status"
+  ];
+
+  const headerRow = summarySheet.addRow(summaryHeaders);
+  headerRow.height = 28;
+  headerRow.eachCell((cell, colNumber) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF65081B' } };
+    cell.font = { name: fontFamily, size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { vertical: 'middle', horizontal: colNumber === 2 ? 'left' : 'center' };
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FF65081B' } },
+      left: { style: 'thin', color: { argb: 'FF8B1B32' } },
+      bottom: { style: 'medium', color: { argb: 'FF65081B' } },
+      right: { style: 'thin', color: { argb: 'FF8B1B32' } }
+    };
+  });
+
+  const cellBorder = {
+    top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+    left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+    bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+    right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+  };
+
+  reportData.summaryRows.forEach(s => {
+    const rowValues = [
+      s.index, s.name, s.employeeId, s.phone, s.department, s.position,
+      s.totalDaysAttended, s.totalEventDays, s.attendanceRate, s.firstScan, s.latestScan, s.status
+    ];
+    const dataRow = summarySheet.addRow(rowValues);
+    dataRow.height = 24;
+
+    dataRow.eachCell((cell, colNumber) => {
+      cell.border = cellBorder;
+      cell.font = { name: fontFamily, size: 10 };
+
+      if (colNumber === 1) {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.font = { name: fontFamily, size: 10, color: { argb: 'FF6B7280' } };
+      } else if (colNumber === 2) {
+        cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        cell.font = { name: fontFamily, size: 10, bold: true, color: { argb: 'FF111827' } };
+      } else if (colNumber === 7) {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.font = { name: fontFamily, size: 11, bold: true, color: { argb: 'FF65081B' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDF2F8' } };
+      } else if (colNumber === 9) {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.font = { name: fontFamily, size: 10, bold: true };
+      } else if (colNumber === 12) {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        if (s.status.startsWith('Excellent')) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+          cell.font = { name: fontFamily, size: 10, bold: true, color: { argb: 'FF166534' } };
+        } else if (s.status.startsWith('Good')) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF9C3' } };
+          cell.font = { name: fontFamily, size: 10, bold: true, color: { argb: 'FF854D0E' } };
+        } else if (s.status.startsWith('Low')) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+          cell.font = { name: fontFamily, size: 10, color: { argb: 'FF991B1B' } };
+        } else {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
+          cell.font = { name: fontFamily, size: 10, color: { argb: 'FF6B7280' } };
+        }
+      } else {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      }
+    });
+  });
+
+  summarySheet.getColumn(1).width = 6;   // #
+  summarySheet.getColumn(2).width = 28;  // Name
+  summarySheet.getColumn(3).width = 16;  // Employee ID
+  summarySheet.getColumn(4).width = 16;  // Phone
+  summarySheet.getColumn(5).width = 18;  // Department
+  summarySheet.getColumn(6).width = 18;  // Position
+  summarySheet.getColumn(7).width = 22;  // Total Attended (Days)
+  summarySheet.getColumn(8).width = 18;  // Total Event Days
+  summarySheet.getColumn(9).width = 18;  // Attendance Rate
+  summarySheet.getColumn(10).width = 20; // First Scan
+  summarySheet.getColumn(11).width = 20; // Latest Scan
+  summarySheet.getColumn(12).width = 24; // Status
+
+
+  // --- SHEET 2: Detailed Attended Scans Log ---
+  const detailSheet = workbook.addWorksheet('Detailed Attended Logs', {
+    views: [{ showGridLines: true }]
+  });
+
+  const dTitleRow = detailSheet.addRow([`Detailed Scans Log (${reportData.detailedLogs.length} Total Records)`]);
+  dTitleRow.height = 28;
+  detailSheet.mergeCells(1, 1, 1, 9);
+  const dTitleCell = dTitleRow.getCell(1);
+  dTitleCell.font = { name: fontFamily, size: 14, bold: true, color: { argb: 'FF65081B' } };
+  dTitleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  detailSheet.addRow([]);
+
+  const detailHeaders = ["#", "Date", "Time", "Student Name", "Employee ID", "Phone", "Department", "Scanned By", "Location"];
+  const dHeaderRow = detailSheet.addRow(detailHeaders);
+  dHeaderRow.height = 26;
+
+  dHeaderRow.eachCell((cell, colNumber) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF65081B' } };
+    cell.font = { name: fontFamily, size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { vertical: 'middle', horizontal: colNumber === 4 ? 'left' : 'center' };
+    cell.border = cellBorder;
+  });
+
+  reportData.detailedLogs.forEach(d => {
+    const rowValues = [d.index, d.date, d.time, d.name, d.employeeId, d.phone, d.department, d.scannedBy, d.location];
+    const dataRow = detailSheet.addRow(rowValues);
+    dataRow.height = 22;
+
+    dataRow.eachCell((cell, colNumber) => {
+      cell.border = cellBorder;
+      cell.font = { name: fontFamily, size: 10 };
+      cell.alignment = { vertical: 'middle', horizontal: colNumber === 4 ? 'left' : 'center' };
+    });
+  });
+
+  detailSheet.getColumn(1).width = 6;   // #
+  detailSheet.getColumn(2).width = 14;  // Date
+  detailSheet.getColumn(3).width = 12;  // Time
+  detailSheet.getColumn(4).width = 28;  // Name
+  detailSheet.getColumn(5).width = 16;  // Employee ID
+  detailSheet.getColumn(6).width = 16;  // Phone
+  detailSheet.getColumn(7).width = 18;  // Department
+  detailSheet.getColumn(8).width = 20;  // Scanned By
+  detailSheet.getColumn(9).width = 22;  // Location
+
+  // Save & Trigger Download
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const fileDate = new Date().toISOString().split('T')[0];
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `Total_Attended_Report_${fileDate}.xlsx`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+

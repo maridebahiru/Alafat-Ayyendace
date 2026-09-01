@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Search, Download, UserCheck, BarChart2, Hash, Phone, Clock, Calendar as CalendarIcon, UserPlus, ChevronDown, X, FileSpreadsheet, FileText, Filter } from 'lucide-react';
-import { exportToCSV, exportToExcel, exportToPDF } from '../../utils/exportUtils';
+import { exportToCSV, exportToExcel, exportToPDF, exportTotalAttendedExcel } from '../../utils/exportUtils';
 import { isSuperAdmin } from '../../utils/rbac';
 
 const AdminDataTab = ({ 
@@ -76,6 +76,7 @@ const AdminDataTab = ({
 
     const handleExportCSV = () => exportToCSV({ students, attendance, startDate, endDate, department: selectedDepartment });
     const handleExportExcel = () => exportToExcel({ students, attendance, startDate, endDate, department: selectedDepartment });
+    const handleExportTotalAttendedExcel = () => exportTotalAttendedExcel({ students, attendance, startDate, endDate, department: selectedDepartment });
     const handleExportPDF = () => exportToPDF({ students, attendance, startDate, endDate, department: selectedDepartment });
 
     return (
@@ -94,13 +95,16 @@ const AdminDataTab = ({
                 {/* Multi-Format Export Buttons (Super Admin Only) */}
                 {superAdmin && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                        <button onClick={handleExportCSV} style={actionBtnStyle}>
+                        <button onClick={handleExportCSV} style={actionBtnStyle} title="Export CSV Pivot">
                             <Download size={15} /> CSV
                         </button>
-                        <button onClick={handleExportExcel} style={{ ...actionBtnStyle, backgroundColor: 'rgba(0, 255, 128, 0.1)', color: '#00ff80', border: '1px solid rgba(0, 255, 128, 0.3)' }}>
-                            <FileSpreadsheet size={15} /> Excel
+                        <button onClick={handleExportExcel} style={{ ...actionBtnStyle, backgroundColor: 'rgba(0, 255, 128, 0.1)', color: '#00ff80', border: '1px solid rgba(0, 255, 128, 0.3)' }} title="Export Pivot Excel Matrix">
+                            <FileSpreadsheet size={15} /> Pivot Excel
                         </button>
-                        <button onClick={handleExportPDF} style={{ ...actionBtnStyle, backgroundColor: 'rgba(255, 77, 77, 0.1)', color: '#ff4d4d', border: '1px solid rgba(255, 77, 77, 0.3)' }}>
+                        <button onClick={handleExportTotalAttendedExcel} style={{ ...actionBtnStyle, backgroundColor: 'rgba(211, 162, 0, 0.15)', color: 'var(--accent-gold)', border: '1px solid rgba(211, 162, 0, 0.4)' }} title="Export Total Attended Summary & Scans Report (.xlsx)">
+                            <FileSpreadsheet size={15} /> Total Attended (Excel)
+                        </button>
+                        <button onClick={handleExportPDF} style={{ ...actionBtnStyle, backgroundColor: 'rgba(255, 77, 77, 0.1)', color: '#ff4d4d', border: '1px solid rgba(255, 77, 77, 0.3)' }} title="Export PDF Pivot">
                             <FileText size={15} /> PDF
                         </button>
                     </div>

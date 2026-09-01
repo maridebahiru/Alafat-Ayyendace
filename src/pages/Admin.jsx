@@ -21,7 +21,7 @@ import AdminScannedIDModal from '../components/admin/AdminScannedIDModal';
 import AdminLocationGate from '../components/admin/AdminLocationGate';
 import { TabButton } from '../components/admin/AdminShared';
 import { getStudentByQrToken, getStudentByIdentifier, cleanScannedToken } from '../utils/studentUtils';
-import { exportToCSV } from '../utils/exportUtils';
+import { exportToCSV, exportTotalAttendedExcel } from '../utils/exportUtils';
 import { checkPermission, logSuperAdminAudit, getUserRole, isSuperAdmin } from '../utils/rbac';
 import { isLocationVerifiedSession, clearLocationSession, getLocationAuditLog } from '../utils/locationService';
 
@@ -491,6 +491,10 @@ const DashboardContent = ({ onLogout, showToast, toast }) => {
         exportToCSV({ students, attendance });
     };
 
+    const handleExportTotalAttended = () => {
+        exportTotalAttendedExcel({ students, attendance });
+    };
+
     const handleAddStudent = async (studentData) => {
         const perm = checkPermission('create_user');
         if (!perm.allowed) {
@@ -756,8 +760,8 @@ const DashboardContent = ({ onLogout, showToast, toast }) => {
 
                         {superAdmin && (
                             <>
-                                <button onClick={exportCSV} className="header-action-btn" title="Export Data">
-                                    <Database size={16} /> <span className="hide-mobile">Export</span>
+                                <button onClick={handleExportTotalAttended} className="header-action-btn" title="Export Total Attended Excel Report">
+                                    <Database size={16} /> <span className="hide-mobile">Total Attended Excel</span>
                                 </button>
                                 <div style={{ width: '1px', height: '20px', backgroundColor: 'var(--glass-border)' }} className="hide-mobile"></div>
                             </>
